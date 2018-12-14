@@ -2,10 +2,22 @@
 
 const runSeries = require('run-series')
 
-module.exports = function (options, excludedMap) {
+module.exports = function(options, excludedMap) {
   const errorHandler = require('../errorHandler')(options)
 
-  return function (req, res, next) {
+  return function(req, res, next) {
+    if (options.excludedFields.length > 0) {
+      options.excludedFields.forEach(key => {
+        if (req.erm.result.length > 0) {
+          req.erm.result = req.erm.result.map(item => {
+            item[key] = undefined
+            return item
+          })
+        } else {
+          req.erm.result[key] = undefined
+        }
+      })
+    }
     const postMiddleware = (() => {
       switch (req.method.toLowerCase()) {
         case 'get':

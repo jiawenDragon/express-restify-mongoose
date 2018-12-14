@@ -14,6 +14,41 @@ module.exports = function(model, options, excludedMap) {
     })
   }
 
+  function recursiveLoop(obj, processFunc) {
+    if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') {
+      processFunc(obj)
+    } else {
+      for (let key in obj) {
+        if (isPlainObject(obj[key]) || Array.isArray(obj[key])) {
+          recursiveLoop(obj[key], processFunc)
+        } else {
+          processFunc(obj[key], key, obj)
+        }
+      }
+    }
+  }
+
+  function aggregateStatementValidate(statement) {
+    if (!Array.isArray(statement)) {
+      throw new Error('Aggregation statement is illegal.')
+      return false
+    }
+    let dangerousOptions = ['$out']
+    recursiveLoop(statement, function(val, key) {
+      if (dangerousOptions.includes(key)) {
+        throw new Error('Aggregation statement contains dangerous action: ' + key)
+        return false
+      }
+    })
+    return true
+  }
+
+  function aggregate(filteredContext, criteria) {
+    if (aggregateStatementValidate(criteria)) {
+      return filteredContext.aggregate(criteria)
+    }
+  }
+
   function isDistinctExcluded(req) {
     return options.filter.isExcluded(req.erm.query['distinct'], {
       access: req.access,
@@ -23,7 +58,6 @@ module.exports = function(model, options, excludedMap) {
 
   function getItems(req, res, next) {
     const contextModel = (req.erm && req.erm.model) || model
-
     if (isDistinctExcluded(req)) {
       req.erm.result = []
       req.erm.statusCode = 200
@@ -31,6 +65,13 @@ module.exports = function(model, options, excludedMap) {
     }
 
     options.contextFilter(contextModel, req, filteredContext => {
+      if (req.erm.query && req.erm.query.aggregate) {
+        aggregate(filteredContext, req.erm.query.aggregate).then(items => {
+          req.erm.result = items
+          req.erm.statusCode = 200
+          next()
+        }, errorHandler(req, res, next))
+      }
       buildQuery(filteredContext.find(), req.erm.query).then(items => {
         req.erm.result = items
         req.erm.statusCode = 200
@@ -224,48 +265,68 @@ module.exports = function(model, options, excludedMap) {
       return dst
     }
 
-    const cleanBody = moredots(depopulate(req.body))
+    const bodyObj = depopulate(req.body)
 
-    if (options.findOneAndUpdate) {
-      options.contextFilter(contextModel, req, filteredContext => {
-        findById(filteredContext, req.params.id)
-          .findOneAndUpdate(
-            {},
-            {
-              $set: cleanBody
-            },
-            {
+    const hasSpecialKey = function(obj) {
+      return Object.keys(obj).some(item => {
+        return item.includes('$')
+      })
+    }
+
+    let cleanBody = {}
+    if (bodyObj.hasOwnProperty('$set')) {
+      cleanBody = bodyObj
+      cleanBody.$set = moredots(bodyObj.$set)
+    } else if (!hasSpecialKey(bodyObj)) {
+      cleanBody.$set = moredots(bodyObj)
+    } else {
+      cleanBody = bodyObj
+    }
+
+    if (req.params.id) {
+      if (options.findOneAndUpdate) {
+        options.contextFilter(contextModel, req, filteredContext => {
+          findById(filteredContext, req.params.id)
+            .findOneAndUpdate({}, cleanBody, {
               new: true,
               runValidators: options.runValidators
-            }
-          )
-          .exec()
+            })
+            .exec()
+            .then(item => contextModel.populate(item, req.erm.query.populate || []))
+            .then(item => {
+              if (!item) {
+                return errorHandler(req, res, next)(new Error(http.STATUS_CODES[404]))
+              }
+
+              req.erm.result = item
+              req.erm.statusCode = 200
+
+              next()
+            }, errorHandler(req, res, next))
+        })
+      } else {
+        for (const key in cleanBody) {
+          req.erm.document.set(key, cleanBody[key])
+        }
+
+        req.erm.document
+          .save()
           .then(item => contextModel.populate(item, req.erm.query.populate || []))
           .then(item => {
-            if (!item) {
-              return errorHandler(req, res, next)(new Error(http.STATUS_CODES[404]))
-            }
-
             req.erm.result = item
             req.erm.statusCode = 200
 
             next()
           }, errorHandler(req, res, next))
-      })
-    } else {
-      for (const key in cleanBody) {
-        req.erm.document.set(key, cleanBody[key])
       }
-
-      req.erm.document
-        .save()
-        .then(item => contextModel.populate(item, req.erm.query.populate || []))
-        .then(item => {
+    } else {
+      options.contextFilter(contextModel, req, filteredContext => {
+        filteredContext.updateMany(req.erm.query.query, cleanBody).then(item => {
           req.erm.result = item
           req.erm.statusCode = 200
-
           next()
         }, errorHandler(req, res, next))
+      })
     }
   }
 

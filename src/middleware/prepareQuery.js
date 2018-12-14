@@ -2,10 +2,10 @@
 
 const isCoordinates = require('is-coordinates')
 
-module.exports = function (options) {
+module.exports = function(options) {
   const errorHandler = require('../errorHandler')(options)
 
-  function jsonQueryParser (key, value) {
+  function jsonQueryParser(key, value) {
     if (key === '$regex' && !options.allowRegex) {
       return undefined
     }
@@ -17,7 +17,7 @@ module.exports = function (options) {
     return value
   }
 
-  function parseQueryOptions (queryOptions) {
+  function parseQueryOptions(queryOptions) {
     if (queryOptions.select && typeof queryOptions.select === 'string') {
       const select = queryOptions.select.split(',')
       queryOptions.select = {}
@@ -75,35 +75,62 @@ module.exports = function (options) {
     return queryOptions
   }
 
-  return function (req, res, next) {
-    const whitelist = ['distinct', 'limit', 'populate', 'query', 'select', 'skip', 'sort']
-    const query = {}
-
-    for (const key in req.query) {
-      if (whitelist.indexOf(key) === -1) {
+  return function(req, res, next) {
+    const whitelist = ['distinct', 'limit', 'populate', 'query', 'select', 'skip', 'sort', 'aggregate', 'keyword']
+    const query = {
+      query: {}
+    }
+    if (req.query.query) {
+      try {
+        req.query.query = JSON.parse(req.query.query)
+      } catch (e) {
+        throw new Error('invalid_json_query')
+      }
+    }
+    let reqQuery = req.method === 'PUT' || req.method === 'PATCH' ? req.query : Object.assign({}, req.query, req.body)
+    if (reqQuery.page) {
+      options.totalCountHeader = true
+      let pageSize = reqQuery.pageSize ? Number(reqQuery.pageSize) : 10
+      reqQuery.limit = pageSize
+      reqQuery.skip = pageSize * (Number(reqQuery.page) - 1)
+      delete reqQuery.page
+      delete reqQuery.pageSize
+    }
+    let hasQuery = Object.keys(reqQuery).includes('query')
+    for (const key in reqQuery) {
+      if (whitelist.indexOf(key) === -1 && !hasQuery) {
+        try {
+          query.query[key] = JSON.parse(reqQuery[key])
+        } catch (e) {
+          query.query[key] = reqQuery[key]
+        }
         continue
       }
-
       if (key === 'query') {
         try {
-          query[key] = JSON.parse(req.query[key], jsonQueryParser)
+          query[key] = JSON.parse(JSON.stringify(reqQuery[key]), jsonQueryParser)
         } catch (e) {
           return errorHandler(req, res, next)(new Error(`invalid_json_${key}`))
         }
-      } else if (key === 'populate' || key === 'select' || key === 'sort') {
+      } else if (key === 'populate' || key === 'select' || key === 'sort' || key === 'aggregate') {
         try {
-          query[key] = JSON.parse(req.query[key])
+          query[key] = JSON.parse(reqQuery[key])
         } catch (e) {
-          query[key] = req.query[key]
+          query[key] = reqQuery[key]
         }
       } else if (key === 'limit' || key === 'skip') {
-        query[key] = parseInt(req.query[key], 10)
+        query[key] = parseInt(reqQuery[key], 10)
 
-        if (`${query[key]}` !== `${req.query[key]}`) {
+        if (`${query[key]}` !== `${reqQuery[key]}`) {
           return errorHandler(req, res, next)(new Error(`invalid_${key}_value`))
         }
+      } else if (key === 'keyword') {
+        let regex = new RegExp(JSON.parse(reqQuery[key]), 'i')
+        query.query.$or = options.keywordsFields.map(field => {
+          return { [field]: regex }
+        })
       } else {
-        query[key] = req.query[key]
+        query[key] = reqQuery[key]
       }
     }
 
