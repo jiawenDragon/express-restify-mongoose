@@ -278,9 +278,15 @@ module.exports = function(model, options, excludedMap) {
       cleanBody = bodyObj
       cleanBody.$set = moredots(bodyObj.$set)
     } else if (!hasSpecialKey(bodyObj)) {
-      cleanBody.$set = moredots(bodyObj)
+      cleanBody = moredots(bodyObj)
     } else {
       cleanBody = bodyObj
+      Object.keys(cleanBody).forEach(key => {
+        if (!key.includes('$')) {
+          cleanBody.$set = Object.assign({}, cleanBody.$set, moredots({ [key]: cleanBody[key] }))
+          delete cleanBody[key]
+        }
+      })
     }
 
     if (req.params.id) {
